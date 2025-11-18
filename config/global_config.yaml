@@ -24,3 +24,9 @@ wandb:
 training:
   grad_accumulation_steps: 1
   enable_activation_checkpointing: false
+  checkpoint_every_n_steps: 0
+
+model_registry:
+  enabled: true
+  provider: "wandb"  # options: wandb, huggingface
+  huggingface_repo: ""
