@@ -464,8 +464,21 @@ def evaluate(
 
                 # Postprocess
                 for set_name, m in reduced_metrics.items():
-                    count = m.pop("count")
-                    reduced_metrics[set_name] = {k: v / count for k, v in m.items()}
+                    count = float(max(m.pop("count"), 1))
+                    accuracy_sum = float(m.pop("accuracy", 0.0))
+                    accuracy_sq_sum = float(m.pop("accuracy_sq", 0.0))
+                    f1_sum = float(m.pop("f1", 0.0))
+
+                    processed = {}
+                    for k, v in m.items():
+                        processed[k] = float(v) / count
+
+                    accuracy_mean = accuracy_sum / count
+                    processed["accuracy"] = accuracy_mean
+                    processed["f1"] = f1_sum / count if count > 0 else 0.0
+                    processed["accuracy_variance"] = max(accuracy_sq_sum / count - accuracy_mean ** 2, 0.0)
+
+                    reduced_metrics[set_name] = processed
 
         # Run evaluators
         if rank == 0:
