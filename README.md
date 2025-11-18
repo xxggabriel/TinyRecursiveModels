@@ -67,6 +67,22 @@ Every config file now exposes three knobs to cap the number of processed example
 
 Set any of them to a positive integer in your YAML (e.g. `config/cfg_pretrain.yaml`) to truncate that split to the desired number of samples. Values `<= 0` keep the full dataset. When a requested limit exceeds the available data, the dataloader prints a single warning and automatically falls back to the complete set so training and evaluation continue uninterrupted.
 
+### Docker (CUDA / L4)
+
+Train inside a reproducible CUDA environment that targets NVIDIA L4 GPUs:
+
+```bash
+# Build image
+docker build -t trm-l4 .
+
+# Launch with GPU access and your local repo mounted
+docker run --gpus all --rm -it \
+  -v $(pwd):/workspace/TinyRecursiveModels \
+  trm-l4
+```
+
+The image is based on `pytorch/pytorch:2.4.0-cuda12.1-cudnn8-runtime`, which ships with CUDA 12.1 capable of running efficiently on L4 cards (SM 8.9). Inside the container you can run the usual training commands, e.g. `python pretrain.py arch=trm`. Make sure the NVIDIA Container Toolkit is installed on the host so Docker can expose the GPU (`nvidia-smi` inside the container should list the L4 device).
+
 ## Experiments
 
 ### Attention Variants (standard vs. GQA)
