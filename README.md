@@ -35,14 +35,14 @@ wandb login YOUR-LOGIN # login if you want the logger to sync results to your We
 
 ```bash
 # ARC-AGI-1
-python -m dataset.build_arc_dataset \
+python dataset/build_arc_dataset.py \
   --input-file-prefix kaggle/combined/arc-agi \
   --output-dir data/arc1concept-aug-1000 \
   --subsets training evaluation concept \
   --test-set-name evaluation
 
 # ARC-AGI-2
-python -m dataset.build_arc_dataset \
+python dataset/build_arc_dataset.py \
   --input-file-prefix kaggle/combined/arc-agi \
   --output-dir data/arc2concept-aug-1000 \
   --subsets training2 evaluation2 concept \
@@ -70,6 +70,9 @@ Set any of them to a positive integer in your YAML (e.g. `config/cfg_pretrain.ya
 ### Global Configuration & Credentials
 
 Fill in `config/global_config.yaml` to centralize credentials (Weights & Biases API key, Hugging Face token, Kaggle keys) and environment defaults (checkpoint path root, logging directory, preferred dtype/mixed-precision, default wandb entity/project/tags). At runtime `pretrain.py` loads this file, injects any missing environment variables (e.g. `WANDB_API_KEY`, `WANDB_ENTITY`, `KAGGLE_KEY`), and uses the `wandb`/`environment` sections as fallbacks for project names, run grouping, and checkpoint directories.
+
+- `training.checkpoint_every_n_steps`: optional auto-checkpoint frequency (0 disables). When set, the trainer snapshots the model every N training steps and logs it via the `model_registry` settings.
+- `model_registry`: choose where checkpoints are uploaded (`wandb` by default; switch to `huggingface` by providing a `huggingface_repo` like `your-org/trm-checkpoints`).
 
 ### Docker (CUDA / L4)
 
