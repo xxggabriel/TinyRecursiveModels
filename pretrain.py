@@ -115,6 +115,7 @@ class PretrainConfig(pydantic.BaseModel):
     eval_interval: Optional[int] = None
     min_eval_interval: Optional[int] = 0 # when to start eval
     eval_save_outputs: List[str] = []
+    checkpoint_every_n_steps: Optional[int] = None
 
     ema: bool = False # use Exponential-Moving-Average
     ema_rate: float = 0.999 # EMA-rate
@@ -272,13 +273,48 @@ def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetada
     )
 
 
+MODEL_REGISTRY_CONFIG = GLOBAL_CONFIG.get("model_registry", {}) if isinstance(GLOBAL_CONFIG, dict) else {}
+
+
 def save_train_state(config: PretrainConfig, train_state: TrainState):
     # FIXME: Only saved model.
     if config.checkpoint_path is None:
-        return
+        return None
 
     os.makedirs(config.checkpoint_path, exist_ok=True)
-    torch.save(train_state.model.state_dict(), os.path.join(config.checkpoint_path, f"step_{train_state.step}"))
+    checkpoint_file = os.path.join(config.checkpoint_path, f"step_{train_state.step}")
+    torch.save(train_state.model.state_dict(), checkpoint_file)
+    return checkpoint_file
+
+
+def log_checkpoint_artifact(config: PretrainConfig, checkpoint_file: str, step: int):
+    if not MODEL_REGISTRY_CONFIG.get("enabled", True):
+        return
+
+    provider = MODEL_REGISTRY_CONFIG.get("provider", "wandb").lower()
+    if provider == "wandb":
+        artifact_name = f"{config.run_name}-step-{step}"
+        artifact = wandb.Artifact(name=artifact_name, type="model")
+        artifact.add_file(checkpoint_file, name=os.path.basename(checkpoint_file))
+        wandb.log_artifact(artifact)
+    elif provider == "huggingface":
+        repo_id = MODEL_REGISTRY_CONFIG.get("huggingface_repo")
+        if not repo_id:
+            print("Model registry provider 'huggingface' selected but no 'huggingface_repo' configured.")
+            return
+        try:
+            from huggingface_hub import HfApi
+        except ImportError:
+            print("huggingface_hub is required to upload checkpoints to Hugging Face.")
+            return
+        api = HfApi()
+        api.upload_file(
+            path_or_fileobj=checkpoint_file,
+            path_in_repo=os.path.basename(checkpoint_file),
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message=f"Add checkpoint step {step}"
+        )
 
 
 def load_checkpoint(model: nn.Module, config: PretrainConfig):
@@ -393,7 +429,7 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             train_metrics["train/f1"] = f1_sum / count if count > 0 else 0.0
             train_metrics["train/accuracy_variance"] = max(accuracy_sq_sum / count - train_accuracy ** 2, 0.0)
             train_metrics["train/lr"] = lr_this_step
-            return train_metrics
+            return train_metrics, lr_this_step
 
 def evaluate(
     config: PretrainConfig,
@@ -592,6 +628,9 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
             base_name = f"{config.arch.name.split('@')[-1]} {coolname.generate_slug(2)}"
             group_prefix = wandb_defaults.get("group")
             config.run_name = f"{group_prefix}-{base_name}" if group_prefix else base_name
+        if config.checkpoint_every_n_steps is None:
+            training_defaults = GLOBAL_CONFIG.get("training", {}) if isinstance(GLOBAL_CONFIG, dict) else {}
+            config.checkpoint_every_n_steps = training_defaults.get("checkpoint_every_n_steps")
         if config.checkpoint_path is None:
             checkpoint_root = env_defaults.get("checkpoint_root", "checkpoints")
             config.checkpoint_path = os.path.join(checkpoint_root, config.project_name, config.run_name)
@@ -693,12 +732,22 @@ def launch(hydra_config: DictConfig):
             print("TRAIN")
         train_state.model.train()
         for set_name, batch, global_batch_size in train_loader:
-            metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
+            result = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
+
+            if result is not None:
+                metrics, lr_this_step = result
+            else:
+                metrics = lr_this_step = None
 
             if RANK == 0 and metrics is not None:
                 flat_metrics = flatten_metrics(metrics)
                 wandb.log(flat_metrics, step=train_state.step)
                 log_eval_charts(flat_metrics)
+                if config.checkpoint_every_n_steps and config.checkpoint_every_n_steps > 0:
+                    if train_state.step % config.checkpoint_every_n_steps == 0:
+                        checkpoint_file = save_train_state(config, train_state)
+                        if checkpoint_file:
+                            log_checkpoint_artifact(config, checkpoint_file, train_state.step)
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
             if config.ema:
                 ema_helper.update(train_state.model)
@@ -724,13 +773,17 @@ def launch(hydra_config: DictConfig):
                 cpu_group=CPU_PROCESS_GROUP)
 
             if RANK == 0 and metrics is not None:
-                wandb.log(metrics, step=train_state.step)
+                flat_metrics = flatten_metrics(metrics)
+                wandb.log(flat_metrics, step=train_state.step)
+                log_eval_charts(flat_metrics)
                 
             ############ Checkpointing
             if RANK == 0:
                 print("SAVE CHECKPOINT")
             if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
-                save_train_state(config, train_state_eval)
+                checkpoint_file = save_train_state(config, train_state_eval)
+                if checkpoint_file:
+                    log_checkpoint_artifact(config, checkpoint_file, train_state_eval.step)
 
             if config.ema:
                 del train_state_eval
