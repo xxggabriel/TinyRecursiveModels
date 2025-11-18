@@ -67,6 +67,10 @@ Every config file now exposes three knobs to cap the number of processed example
 
 Set any of them to a positive integer in your YAML (e.g. `config/cfg_pretrain.yaml`) to truncate that split to the desired number of samples. Values `<= 0` keep the full dataset. When a requested limit exceeds the available data, the dataloader prints a single warning and automatically falls back to the complete set so training and evaluation continue uninterrupted.
 
+### Global Configuration & Credentials
+
+Fill in `config/global_config.yaml` to centralize credentials (Weights & Biases API key, Hugging Face token, Kaggle keys) and environment defaults (checkpoint path root, logging directory, preferred dtype/mixed-precision, default wandb entity/project/tags). At runtime `pretrain.py` loads this file, injects any missing environment variables (e.g. `WANDB_API_KEY`, `WANDB_ENTITY`, `KAGGLE_KEY`), and uses the `wandb`/`environment` sections as fallbacks for project names, run grouping, and checkpoint directories.
+
 ### Docker (CUDA / L4)
 
 Train inside a reproducible CUDA environment that targets NVIDIA L4 GPUs:

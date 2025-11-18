@@ -1,0 +1,26 @@
+credentials:
+  wandb_api_key: ""
+  huggingface_token: ""
+  kaggle:
+    username: ""
+    api_key: ""
+
+environment:
+  default_device: "cuda"
+  preferred_dtype: "bfloat16"
+  checkpoint_root: "checkpoints"
+  log_root: "logs"
+  mixed_precision: "bf16"
+  global_seed: 0
+
+wandb:
+  entity: "your-wandb-entity"
+  project: "TinyRecursiveModels"
+  tags:
+    - trm
+    - recursion
+  group: "TinyRecursiveModels"
+
+training:
+  grad_accumulation_steps: 1
+  enable_activation_checkpointing: false

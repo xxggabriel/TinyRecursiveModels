@@ -23,6 +23,14 @@ from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMeta
 from utils.functions import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
 from models.ema import EMAHelper
+from utils.global_config import (
+    apply_global_credentials,
+    get_global_setting,
+    load_global_config,
+)
+
+GLOBAL_CONFIG = load_global_config()
+apply_global_credentials(GLOBAL_CONFIG)
 
 
 class LossConfig(pydantic.BaseModel):
@@ -550,12 +558,18 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
         config = PretrainConfig(**hydra_config)  # type: ignore
 
         # Naming
+        wandb_defaults = GLOBAL_CONFIG.get("wandb", {}) if isinstance(GLOBAL_CONFIG, dict) else {}
+        env_defaults = GLOBAL_CONFIG.get("environment", {}) if isinstance(GLOBAL_CONFIG, dict) else {}
+
         if config.project_name is None:
-            config.project_name = f"{os.path.basename(config.data_paths[0]).capitalize()}-ACT-torch"
+            config.project_name = wandb_defaults.get("project") or f"{os.path.basename(config.data_paths[0]).capitalize()}-ACT-torch"
         if config.run_name is None:
-            config.run_name = f"{config.arch.name.split('@')[-1]} {coolname.generate_slug(2)}"
+            base_name = f"{config.arch.name.split('@')[-1]} {coolname.generate_slug(2)}"
+            group_prefix = wandb_defaults.get("group")
+            config.run_name = f"{group_prefix}-{base_name}" if group_prefix else base_name
         if config.checkpoint_path is None:
-            config.checkpoint_path = os.path.join("checkpoints", config.project_name, config.run_name)
+            checkpoint_root = env_defaults.get("checkpoint_root", "checkpoints")
+            config.checkpoint_path = os.path.join(checkpoint_root, config.project_name, config.run_name)
 
         objects = [config]
 
@@ -620,7 +634,24 @@ def launch(hydra_config: DictConfig):
     ema_helper = None
     if RANK == 0:
         progress_bar = tqdm.tqdm(total=train_state.total_steps)
-        wandb.init(project=config.project_name, name=config.run_name, config=config.model_dump(), settings=wandb.Settings(_disable_stats=True))  # type: ignore
+        wandb_params = {
+            "project": config.project_name,
+            "name": config.run_name,
+            "config": config.model_dump(),
+            "settings": wandb.Settings(_disable_stats=True),
+        }
+        wandb_defaults = GLOBAL_CONFIG.get("wandb", {}) if isinstance(GLOBAL_CONFIG, dict) else {}
+        entity = wandb_defaults.get("entity")
+        if entity:
+            wandb_params["entity"] = entity
+        tags = wandb_defaults.get("tags")
+        if tags:
+            wandb_params["tags"] = tags
+        group = wandb_defaults.get("group")
+        if group:
+            wandb_params.setdefault("group", group)
+
+        wandb.init(**wandb_params)  # type: ignore
         wandb.log({"num_params": sum(x.numel() for x in train_state.model.parameters())}, step=0)
         save_code_and_config(config)
     if config.ema:
