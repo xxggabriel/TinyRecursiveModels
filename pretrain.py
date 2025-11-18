@@ -1,4 +1,4 @@
-from typing import Optional, Any, Sequence, List
+from typing import Optional, Any, Sequence, List, Dict
 from dataclasses import dataclass
 import os
 import math
@@ -28,6 +28,17 @@ from utils.global_config import (
     get_global_setting,
     load_global_config,
 )
+
+
+def flatten_metrics(metrics: Dict[str, Any], prefix: Optional[str] = None) -> Dict[str, Any]:
+    flattened: Dict[str, Any] = {}
+    for key, value in metrics.items():
+        full_key = f"{prefix}/{key}" if prefix else key
+        if isinstance(value, dict):
+            flattened.update(flatten_metrics(value, prefix=full_key))
+        else:
+            flattened[full_key] = value
+    return flattened
 
 GLOBAL_CONFIG = load_global_config()
 apply_global_credentials(GLOBAL_CONFIG)
@@ -671,7 +682,7 @@ def launch(hydra_config: DictConfig):
             metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
 
             if RANK == 0 and metrics is not None:
-                wandb.log(metrics, step=train_state.step)
+                wandb.log(flatten_metrics(metrics), step=train_state.step)
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
             if config.ema:
                 ema_helper.update(train_state.model)
