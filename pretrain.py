@@ -40,6 +40,20 @@ def flatten_metrics(metrics: Dict[str, Any], prefix: Optional[str] = None) -> Di
             flattened[full_key] = value
     return flattened
 
+
+def log_eval_charts(flat_metrics: Dict[str, Any]):
+    for group in ("validation", "test"):
+        data = []
+        prefix = f"{group}/"
+        for key, value in flat_metrics.items():
+            if key.startswith(prefix):
+                metric_name = key[len(prefix):]
+                data.append((metric_name, float(value)))
+        if not data:
+            continue
+        table = wandb.Table(data=data, columns=["metric", "value"])
+        wandb.log({group: wandb.plot.bar(table, "metric", "value", title=group)})
+
 GLOBAL_CONFIG = load_global_config()
 apply_global_credentials(GLOBAL_CONFIG)
 
@@ -682,7 +696,9 @@ def launch(hydra_config: DictConfig):
             metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
 
             if RANK == 0 and metrics is not None:
-                wandb.log(flatten_metrics(metrics), step=train_state.step)
+                flat_metrics = flatten_metrics(metrics)
+                wandb.log(flat_metrics, step=train_state.step)
+                log_eval_charts(flat_metrics)
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
             if config.ema:
                 ema_helper.update(train_state.model)
