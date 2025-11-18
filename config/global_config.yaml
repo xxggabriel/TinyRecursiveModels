@@ -14,7 +14,7 @@ environment:
   global_seed: 0
 
 wandb:
-  entity: "your-wandb-entity"
+  entity: "gabrielsouza2-federal-university-of-goi-s"
   project: "TinyRecursiveModels"
   tags:
     - trm
