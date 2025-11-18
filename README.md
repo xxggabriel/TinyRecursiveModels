@@ -57,6 +57,16 @@ python dataset/build_sudoku_dataset.py --output-dir data/sudoku-extreme-1k-aug-1
 python dataset/build_maze_dataset.py # 1000 examples, 8 augments
 ```
 
+### Dataset Limits via YAML
+
+Every config file now exposes three knobs to cap the number of processed examples per split:
+
+- `train_example_limit`
+- `val_example_limit`
+- `test_example_limit`
+
+Set any of them to a positive integer in your YAML (e.g. `config/cfg_pretrain.yaml`) to truncate that split to the desired number of samples. Values `<= 0` keep the full dataset. When a requested limit exceeds the available data, the dataloader prints a single warning and automatically falls back to the complete set so training and evaluation continue uninterrupted.
+
 ## Experiments
 
 ### Attention Variants (standard vs. GQA)

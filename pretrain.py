@@ -50,6 +50,10 @@ class PretrainConfig(pydantic.BaseModel):
     # Evaluators
     evaluators: List[EvaluatorConfig] = []
 
+    train_example_limit: int = 0
+    val_example_limit: int = 0
+    test_example_limit: int = 0
+
     # Hyperparams
     global_batch_size: int
     epochs: int
@@ -100,6 +104,9 @@ def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size:
         dataset_paths=config.data_paths_test if len(config.data_paths_test)>0 and split=="test" else config.data_paths,
         rank=rank,
         num_replicas=world_size,
+        train_example_limit=config.train_example_limit,
+        val_example_limit=config.val_example_limit,
+        test_example_limit=config.test_example_limit,
         **kwargs
     ), split=split)
     dataloader = DataLoader(
