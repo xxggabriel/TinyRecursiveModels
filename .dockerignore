@@ -1,0 +1,14 @@
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Local data/checkpoints/logs
+checkpoints/
+data/
+wandb/
+outputs/
+
+# Git metadata not needed inside the image
+.git
+.gitignore
