@@ -59,6 +59,22 @@ python dataset/build_maze_dataset.py # 1000 examples, 8 augments
 
 ## Experiments
 
+### Attention Variants (standard vs. GQA)
+
+`config/arch/trm.yaml` keeps the original multi-head attention layout, while `config/arch/trm_gqa.yaml` reuses the same hyperparameters but enables grouped-query attention (`num_key_value_heads=4` for the default 8 heads). You can benchmark them with the same training recipe:
+
+```bash
+# Baseline TRM attention
+run_name="pretrain_trm_baseline"
+python pretrain.py arch=trm +run_name=${run_name}
+
+# TRM + GQA
+run_name="pretrain_trm_gqa"
+python pretrain.py arch=trm_gqa +run_name=${run_name}
+```
+
+Both runs report to Weights & Biases the train/validation/test loss, accuracy, macro-F1, and the variance of the per-example accuracies (`train/accuracy_variance`, `test/accuracy_variance`, etc.), so you can compare convergence and stability directly on the dashboard.
+
 ### ARC-AGI-1 (assuming 4 H-100 GPUs):
 
 ```bash
