@@ -74,6 +74,36 @@ Fill in `config/global_config.yaml` to centralize credentials (Weights & Biases 
 - `training.checkpoint_every_n_steps`: optional auto-checkpoint frequency (0 disables). When set, the trainer snapshots the model every N training steps and logs it via the `model_registry` settings.
 - `model_registry`: choose where checkpoints are uploaded (`wandb` by default; switch to `huggingface` by providing a `huggingface_repo` like `your-org/trm-checkpoints`).
 
+### Cloud / Vertex AI Runtime
+
+`pretrain.py` now ships with a thin cloud-runtime layer designed for managed platforms such as Google Vertex AI (Spot instances) but generic enough to support other providers later. Enable it by defining the environment variables below before the container entrypoint executes `python pretrain.py`:
+
+| Variable | Description |
+| --- | --- |
+| `CLOUD_PROVIDER` | Name of the environment (`gcp`, `aws`, etc.). Set to `gcp` on Vertex AI so the trainer polls the metadata server for the [`instance/preempted` and `maintenance-event` signals](https://cloud.google.com/compute/docs/instances/create-use-spot). |
+| `CLOUD_TRAINING_AUTOSTART` | When truthy (`1`, `true`, `yes`), indicates that the container was bootstrapped by an orchestrator and that env overrides should be applied automatically. |
+| `CLOUD_TRAINING_OVERRIDES` / `CLOUD_TRAINING_OVERRIDES_FILE` | JSON/string or YAML file with `PretrainConfig` overrides (model family, data paths, hyperparameters, etc.). Example: `CLOUD_TRAINING_OVERRIDES='{"arch": {"name": "trm"}, "epochs": 200, "global_batch_size": 512}'`. |
+| `CLOUD_CHECKPOINT_URI` | Cloud storage destination for checkpoints. Accepts local paths or URIs (e.g. `gs://my-bucket/trm/{project}/{run}`). Placeholders `{project}`, `{run}`, `{step}`, `{epoch}`, `{reason}` are expanded automatically. |
+| `CLOUD_CHECKPOINT_INTERVAL_EPOCHS` | Save cadence in epochs (integer). Every `X` epochs a checkpoint is written locally and uploaded to the cloud path above. |
+| `CLOUD_INITIAL_CHECKPOINT_URI` | Optional URI for warm-start/continuation. On boot the file is downloaded to `${checkpoint_path}/cloud_init` and used as `load_checkpoint`. |
+| `CLOUD_POLL_INTERVAL_SECONDS` | (Optional) Poll interval for termination notices; defaults to 5 seconds. |
+
+Google Spot instances emit a `TERMINATED` warning before revocation. When `CLOUD_PROVIDER=gcp` the runtime watches the metadata endpoints and, upon receiving the notice, flushes Weights & Biases logs, writes a final checkpoint, uploads it to `CLOUD_CHECKPOINT_URI`, and exits so Vertex AI can restart the job with `CLOUD_INITIAL_CHECKPOINT_URI` pointing to the saved artifact.
+
+**Vertex AI example:**
+
+```bash
+export CLOUD_PROVIDER=gcp
+export CLOUD_TRAINING_AUTOSTART=1
+export CLOUD_TRAINING_OVERRIDES='{"data_paths": ["gs://my-datasets/arc"], "epochs": 150, "global_batch_size": 256}'
+export CLOUD_CHECKPOINT_URI=gs://my-bucket/trm/{project}/{run}
+export CLOUD_CHECKPOINT_INTERVAL_EPOCHS=2
+export CLOUD_INITIAL_CHECKPOINT_URI=gs://my-bucket/trm/latest/checkpoint.pt  # optional
+python pretrain.py
+```
+
+Use the same variables on other clouds; implementers only need to plug in a new storage client/poller for their provider to benefit from the shared abstraction.
+
 ### Docker (CUDA / L4)
 
 Train inside a reproducible CUDA environment that targets NVIDIA L4 GPUs:

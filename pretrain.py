@@ -23,6 +23,12 @@ from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMeta
 from utils.functions import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
 from models.ema import EMAHelper
+from cloud import (
+    CloudRuntimeContext,
+    apply_cloud_overrides,
+    build_cloud_context_from_env,
+    set_active_context,
+)
 from utils.global_config import (
     apply_global_credentials,
     get_global_setting,
@@ -613,10 +619,18 @@ def save_code_and_config(config: PretrainConfig):
     wandb.run.log_code(config.checkpoint_path)
 
 
-def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> PretrainConfig:
+def load_synced_config(
+    hydra_config: DictConfig,
+    rank: int,
+    world_size: int,
+    cloud_context: Optional[CloudRuntimeContext] = None,
+) -> PretrainConfig:
     objects = [None]
     if rank == 0:
         config = PretrainConfig(**hydra_config)  # type: ignore
+
+        if cloud_context is not None:
+            config = apply_cloud_overrides(config, cloud_context)
 
         # Naming
         wandb_defaults = GLOBAL_CONFIG.get("wandb", {}) if isinstance(GLOBAL_CONFIG, dict) else {}
@@ -648,6 +662,8 @@ def launch(hydra_config: DictConfig):
     RANK = 0
     WORLD_SIZE = 1
     CPU_PROCESS_GROUP = None
+    cloud_context = build_cloud_context_from_env()
+    set_active_context(cloud_context)
 
     # Initialize distributed training if in distributed environment (e.g. torchrun)
     if "LOCAL_RANK" in os.environ:
@@ -666,10 +682,35 @@ def launch(hydra_config: DictConfig):
         )
 
     # Load sync'ed config
-    config = load_synced_config(hydra_config, rank=RANK, world_size=WORLD_SIZE)
+    config = load_synced_config(
+        hydra_config,
+        rank=RANK,
+        world_size=WORLD_SIZE,
+        cloud_context=cloud_context,
+    )
+
+    if cloud_context is not None:
+        cloud_context.bind_config(config.project_name or "project", config.run_name or "run")
+        cloud_context.start_watchers()
 
     # Seed RNGs to ensure consistency
     torch.random.manual_seed(config.seed + RANK)
+
+    # Download the initial checkpoint when requested through the cloud runtime
+    if cloud_context is not None and config.load_checkpoint is None:
+        local_checkpoint_path = None
+        if RANK == 0:
+            try:
+                checkpoint_root = config.checkpoint_path or os.path.join("checkpoints", config.project_name or "project", config.run_name or "run")
+                init_dir = os.path.join(checkpoint_root, "cloud_init")
+                local_checkpoint_path = cloud_context.prepare_initial_checkpoint(init_dir)
+            except Exception as exc:
+                print(f"Failed to download initial checkpoint: {exc}")
+        paths = [local_checkpoint_path]
+        if WORLD_SIZE > 1:
+            dist.broadcast_object_list(paths, src=0)
+        if paths[0]:
+            config.load_checkpoint = paths[0]
 
     # Dataset
     train_epochs_per_iter = config.eval_interval if config.eval_interval is not None else config.epochs
@@ -692,6 +733,21 @@ def launch(hydra_config: DictConfig):
 
     # Train state
     train_state = init_train_state(config, train_metadata, rank=RANK, world_size=WORLD_SIZE)
+    if cloud_context is not None:
+        cloud_context.bind_steps(train_state.total_steps, config.epochs)
+
+    def sync_cloud_checkpoint(file_path: Optional[str], reason: str, epoch_override: Optional[int] = None):
+        if cloud_context is None or file_path is None:
+            return
+        epoch_value = epoch_override
+        if epoch_value is None:
+            epoch_value = cloud_context.estimate_epoch(train_state.step)
+        cloud_context.handle_checkpoint(
+            file_path,
+            step=train_state.step,
+            epoch=epoch_value,
+            reason=reason,
+        )
 
     # Progress bar and logger
     progress_bar = None
@@ -724,6 +780,7 @@ def launch(hydra_config: DictConfig):
         ema_helper.register(train_state.model)
 
     # Training Loop
+    terminate_requested = False
     for _iter_id in range(total_iters):
         print (f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
 
@@ -739,6 +796,11 @@ def launch(hydra_config: DictConfig):
             else:
                 metrics = lr_this_step = None
 
+            epoch_trigger = cloud_context.should_save_periodic(train_state.step) if cloud_context else None
+            if epoch_trigger is not None and RANK == 0:
+                checkpoint_file = save_train_state(config, train_state)
+                sync_cloud_checkpoint(checkpoint_file, reason="epoch", epoch_override=epoch_trigger)
+
             if RANK == 0 and metrics is not None:
                 flat_metrics = flatten_metrics(metrics)
                 wandb.log(flat_metrics, step=train_state.step)
@@ -748,9 +810,22 @@ def launch(hydra_config: DictConfig):
                         checkpoint_file = save_train_state(config, train_state)
                         if checkpoint_file:
                             log_checkpoint_artifact(config, checkpoint_file, train_state.step)
+                            sync_cloud_checkpoint(checkpoint_file, reason="step")
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
             if config.ema:
                 ema_helper.update(train_state.model)
+
+            if cloud_context and cloud_context.should_stop():
+                if RANK == 0:
+                    terminate_reason = cloud_context.termination_reason() or "termination"
+                    print(f"Termination notice ({terminate_reason}) received. Saving checkpoint before shutdown.")
+                    checkpoint_file = save_train_state(config, train_state)
+                    sync_cloud_checkpoint(checkpoint_file, reason="preemption")
+                terminate_requested = True
+                break
+
+        if terminate_requested:
+            break
 
         if _iter_id >= config.min_eval_interval:
             ############ Evaluation
@@ -784,14 +859,20 @@ def launch(hydra_config: DictConfig):
                 checkpoint_file = save_train_state(config, train_state_eval)
                 if checkpoint_file:
                     log_checkpoint_artifact(config, checkpoint_file, train_state_eval.step)
+                    sync_cloud_checkpoint(checkpoint_file, reason="eval")
 
             if config.ema:
                 del train_state_eval
+
+        if terminate_requested:
+            break
 
     # finalize
     if dist.is_initialized():
         dist.destroy_process_group()
     wandb.finish()
+    if cloud_context is not None:
+        cloud_context.stop_watchers()
 
 
 if __name__ == "__main__":
