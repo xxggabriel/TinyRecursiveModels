@@ -47,18 +47,74 @@ def flatten_metrics(metrics: Dict[str, Any], prefix: Optional[str] = None) -> Di
     return flattened
 
 
-def log_eval_charts(flat_metrics: Dict[str, Any]):
+def deep_update(target: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            deep_update(target[key], value)
+        else:
+            target[key] = value
+    return target
+
+
+def infer_split_from_name(set_name: str) -> Optional[str]:
+    lowered = set_name.lower()
+    if lowered == "train":
+        return "train"
+    if any(hint in lowered for hint in PuzzleDataset.VAL_SET_HINTS):
+        return "validation"
+    if any(hint in lowered for hint in PuzzleDataset.TEST_SET_HINTS):
+        return "test"
+    if lowered == "all":
+        return "validation"
+    return None
+
+
+def group_eval_metrics_by_split(metrics: Optional[Dict[str, Dict[str, Any]]]) -> Dict[str, Any]:
+    if not metrics:
+        return {}
+
+    grouped: Dict[str, Any] = {}
+    total_sets = len(metrics)
+    for set_name, set_metrics in metrics.items():
+        canonical = infer_split_from_name(set_name)
+        if canonical is None:
+            grouped[set_name] = set_metrics
+            continue
+
+        bucket = grouped.setdefault(canonical, {})
+        if total_sets == 1 or set_name.lower() == canonical:
+            if isinstance(set_metrics, dict):
+                bucket.update(set_metrics)
+            else:
+                bucket[set_name] = set_metrics
+        else:
+            bucket[set_name] = set_metrics
+
+    return grouped
+
+
+def build_eval_charts(flat_metrics: Dict[str, Any]) -> Dict[str, Any]:
+    chart_logs: Dict[str, Any] = {}
     for group in ("validation", "test"):
-        data = []
         prefix = f"{group}/"
+        data = []
         for key, value in flat_metrics.items():
-            if key.startswith(prefix):
-                metric_name = key[len(prefix):]
-                data.append((metric_name, float(value)))
+            if not key.startswith(prefix):
+                continue
+            metric_name = key[len(prefix):]
+            try:
+                metric_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            data.append((metric_name, metric_value))
+
         if not data:
             continue
+
         table = wandb.Table(data=data, columns=["metric", "value"])
-        wandb.log({group: wandb.plot.bar(table, "metric", "value", title=group)})
+        chart_logs[f"{group}/charts"] = wandb.plot.bar(table, "metric", "value", title=f"{group.capitalize()} metrics")
+
+    return chart_logs
 
 GLOBAL_CONFIG = load_global_config()
 apply_global_credentials(GLOBAL_CONFIG)
@@ -448,6 +504,7 @@ def evaluate(
     cpu_group: Optional[dist.ProcessGroup],
 ):
     reduced_metrics = None
+    evaluator_metrics: Dict[str, Any] = {}
 
     with torch.inference_mode():
         return_keys = set(config.eval_save_outputs)
@@ -585,13 +642,18 @@ def evaluate(
                 if reduced_metrics is None:
                     reduced_metrics = {}
 
-                reduced_metrics.update(metrics)
+                deep_update(evaluator_metrics, metrics)
                 print(f"  Completed {evaluator.__class__.__name__}")
                 
         if rank == 0:
             print("All evaluators completed!")
 
-    return reduced_metrics
+    if rank == 0:
+        grouped_metrics = group_eval_metrics_by_split(reduced_metrics)
+        deep_update(grouped_metrics, evaluator_metrics)
+        return grouped_metrics
+
+    return None
 
 def save_code_and_config(config: PretrainConfig):
     if config.checkpoint_path is None or wandb.run is None:
@@ -803,8 +865,11 @@ def launch(hydra_config: DictConfig):
 
             if RANK == 0 and metrics is not None:
                 flat_metrics = flatten_metrics(metrics)
-                wandb.log(flat_metrics, step=train_state.step)
-                log_eval_charts(flat_metrics)
+                log_payload = dict(flat_metrics)
+                chart_logs = build_eval_charts(flat_metrics)
+                if chart_logs:
+                    log_payload.update(chart_logs)
+                wandb.log(log_payload, step=train_state.step)
                 if config.checkpoint_every_n_steps and config.checkpoint_every_n_steps > 0:
                     if train_state.step % config.checkpoint_every_n_steps == 0:
                         checkpoint_file = save_train_state(config, train_state)
@@ -849,8 +914,11 @@ def launch(hydra_config: DictConfig):
 
             if RANK == 0 and metrics is not None:
                 flat_metrics = flatten_metrics(metrics)
-                wandb.log(flat_metrics, step=train_state.step)
-                log_eval_charts(flat_metrics)
+                log_payload = dict(flat_metrics)
+                chart_logs = build_eval_charts(flat_metrics)
+                if chart_logs:
+                    log_payload.update(chart_logs)
+                wandb.log(log_payload, step=train_state.step)
                 
             ############ Checkpointing
             if RANK == 0:

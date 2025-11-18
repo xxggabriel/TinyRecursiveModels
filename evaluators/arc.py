@@ -174,4 +174,4 @@ class ARC:
         # Final result
         all_results = {f"ARC/pass@{k}": correct[i] / len(self.test_puzzles) for i, k in enumerate(self.pass_Ks)}
 
-        return all_results
+        return {"test": all_results}
